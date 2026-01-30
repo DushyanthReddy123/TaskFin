@@ -2,8 +2,10 @@ from fastapi import FastAPI, Depends, HTTPException, status
 from fastapi.security import OAuth2PasswordRequestForm
 from sqlalchemy.orm import Session
 from datetime import date, timedelta
+from pydantic import BaseModel
+from typing import List, Dict, Any, Optional
 from .db import models, session
-from . import auth
+from . import auth, retriever
 import time
 import os
 
@@ -14,6 +16,26 @@ import os
 models.Base.metadata.create_all(bind=session.engine)
 
 app = FastAPI()
+
+
+# Pydantic models for search endpoint
+class SearchRequest(BaseModel):
+    query: str
+    k: int = 5
+
+
+class SearchResult(BaseModel):
+    metadata: Dict[str, Any]
+    distance: float
+    text: str
+    rank: int
+
+
+class SearchResponse(BaseModel):
+    results: List[SearchResult]
+    query: str
+    k: int
+
 
 def get_db():
     db = session.SessionLocal()
@@ -111,3 +133,51 @@ def pay_bill(bill_id: int, current_user: models.User = Depends(auth.get_current_
     db.commit()
     db.refresh(bill)
     return bill
+
+
+@app.post("/search", response_model=SearchResponse)
+def search(request: SearchRequest):
+    """
+    Search endpoint for querying bills and transactions using FAISS.
+    
+    This endpoint performs semantic search on the embedded bills and transactions
+    and returns the top-k most similar items.
+    
+    Args:
+        request: SearchRequest with query string and optional k (default: 5)
+    
+    Returns:
+        SearchResponse with list of results containing metadata, distance, and text
+    
+    Raises:
+        HTTPException: If embeddings are not found or retriever fails to initialize
+    """
+    try:
+        results = retriever.search(request.query, request.k)
+        
+        # Convert to SearchResult objects
+        search_results = [
+            SearchResult(
+                metadata=result['metadata'],
+                distance=result['distance'],
+                text=result['text'],
+                rank=result['rank']
+            )
+            for result in results
+        ]
+        
+        return SearchResponse(
+            results=search_results,
+            query=request.query,
+            k=len(search_results)
+        )
+    except FileNotFoundError as e:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail=f"Search service not available: {str(e)}"
+        )
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Search failed: {str(e)}"
+        )
